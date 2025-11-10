@@ -1,52 +1,52 @@
 /*
- * v13: 最终修复版 - 移除错误的 safetySettings
+ * v14: 最终 Vercel 原生 API 版 (100% 重写)
  *
- * 诊断：之前的“无输出”是因为我添加了
- * 错误的 safetySettings: [ ... ]
- * 导致 Google SDK 崩溃或返回空回复。
+ * 诊断：我之前一直在用 Express.js 语法 (res.json)，
+ * 而 Vercel 需要的是标准 Response API (return new Response)。
+ * 这是导致“无输出”的真正原因，代码在 Vercel 端当场崩溃。
  *
- * 修复：我们将其完全移除，使用 Google 的默认安全设置。
+ * 修复：完全重写为 Vercel 能看懂的标准 API。
  */
 
 import { GoogleGenerativeAI } from "@google/generative-ai";
 
-export default async function handler(req, res) {
-  if (req.method === 'OPTIONS') {
-    return handleOptions(req, res);
+// 1. 【【【 关键修复：使用 Vercel 的标准 API 语法 】】】
+export default async function handler(request) {
+
+  // 2. 处理 OPTIONS (CORS 预检)，使用标准 Response
+  if (request.method === "OPTIONS") {
+    return handleOptions();
   }
 
   try {
-    const genAI = new GoogleGenerativeAI(getApiKey(req));
+    // 3. 【【【 关键修复：从 Vercel 的 Request 中提取 body 和 key 】】】
+    const body = await request.json(); // 替换 req.body
+    const apiKey = getApiKey(request);  // 替换 getApiKey(req)
 
-    // 【【【 关键修复：已移除错误的 safetySettings 】】】
+    const genAI = new GoogleGenerativeAI(apiKey);
+
     const model = genAI.getGenerativeModel({
-      model: req.body.model
+      model: body.model // 使用 body.model
     });
 
     const chat = model.startChat({
-      history: convertToGoogleHistory(req.body.messages),
+      history: convertToGoogleHistory(body.messages), // 使用 body.messages
     });
 
-    const prompt = req.body.messages[req.body.messages.length - 1].content;
+    const prompt = body.messages[body.messages.length - 1].content;
     const result = await chat.sendMessage(prompt);
     const response = result.response;
 
-    // 检查 Google 是否因安全（或其他原因）返回了空回复
     if (!response || !response.text()) {
-      // 如果 Google 真的拦截了（比如 NSFW 内容），我们至少返回一个错误
-      let errorMsg = "Gemini API returned an empty response.";
-      if (response && response.promptFeedback && response.promptFeedback.blockReason) {
-        errorMsg = `Gemini API blocked the prompt. Reason: ${response.promptFeedback.blockReason}`;
-      }
-      throw new Error(errorMsg);
+      throw new Error("Gemini API returned an empty response.");
     }
 
-    // 成功，返回 OpenAI 格式的回复
-    res.status(200).json({
+    // 4. 【【【 关键修复：使用标准 Response 返回 OpenAI 格式 】】】
+    const responseBody = {
       id: 'gemini-' + Date.now(),
       object: 'chat.completion',
       created: Math.floor(Date.now() / 1000),
-      model: req.body.model,
+      model: body.model,
       choices: [{
         index: 0,
         message: {
@@ -55,23 +55,31 @@ export default async function handler(req, res) {
         },
         finish_reason: 'stop'
       }],
-      usage: {
-        prompt_tokens: 0, 
-        completion_tokens: 0,
-        total_tokens: 0
-      }
+      usage: { prompt_tokens: 0, completion_tokens: 0, total_tokens: 0 }
+    };
+
+    return new Response(JSON.stringify(responseBody), {
+      status: 200,
+      headers: getCorsHeaders()
     });
 
   } catch (error) {
     console.error("Gemini API Error:", error);
-    res.status(500).json({ error: { message: error.message || "An unknown error occurred" } });
+
+    // 5. 【【【 关键修复：使用标准 Response 返回 500 错误 】】】
+    return new Response(JSON.stringify({
+      error: { message: error.message || "An unknown error occurred" }
+    }), {
+      status: 500,
+      headers: getCorsHeaders()
+    });
   }
 }
 
 // --- 辅助函数 ---
 
-function getApiKey(req) {
-  const authHeader = req.headers.get('authorization');
+function getApiKey(request) {
+  const authHeader = request.headers.get('authorization');
   if (authHeader) {
     return authHeader.split(' ')[1]; // 提取 Bearer YOUR_KEY
   }
@@ -91,10 +99,18 @@ function convertToGoogleHistory(messages) {
   return history;
 }
 
-function handleOptions(req, res) {
-  // 修复 CORS 预检，使其 100% 完整
-  res.setHeader('Access-Control-Allow-Origin', '*');
-  res.setHeader('Access-Control-Allow-Methods', 'GET,HEAD,POST,OPTIONS');
-  res.setHeader('Access-Control-Allow-Headers', 'Content-Type, Authorization');
-  res.status(204).send();
+// 6. 【【【 关键修复：CORS 标头改为辅助函数 】】】
+function getCorsHeaders() {
+  return {
+    "Access-Control-Allow-Origin": "*",
+    "Access-Control-Allow-Methods": "GET,HEAD,POST,OPTIONS",
+    "Access-Control-Allow-Headers": "Content-Type, Authorization",
+  };
+}
+
+function handleOptions() {
+  return new Response(null, {
+    status: 204,
+    headers: getCorsHeaders()
+  });
 }
